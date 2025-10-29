@@ -1,0 +1,1124 @@
+# =====================================================
+# 모듈 임포트
+# =====================================================
+import pygame, sys, secrets, time, math, random
+import numpy as np
+
+# =====================================================
+# Pygame 초기화
+# =====================================================
+pygame.init()                   # Pygame 기본 초기화
+pygame.freetype.init()          # 폰트 모듈 초기화
+pygame.mixer.init()             # 사운드 모듈 초기화
+
+# =====================================================
+# 화면 설정
+# =====================================================
+WIDTH, HEIGHT = 1000, 650
+screen = pygame.display.set_mode((WIDTH, HEIGHT))  # 게임 창 생성
+pygame.display.set_caption("D-15 색각 테스트 (Enhanced)")  # 창 제목 설정
+
+# 아이콘 설정
+icon = pygame.image.load(r"C:\Users\henry\Downloads\포트폴리오 이미지.png")
+pygame.display.set_icon(icon)   # 창 아이콘 설정
+
+# 프레임 관리
+clock = pygame.time.Clock()     # FPS 제어용 시계 객체 생성
+
+# 폰트 설정
+font_text = pygame.freetype.SysFont("Malgun Gothic", 24)  # 텍스트 출력용 폰트
+
+# =====================================================
+# 색상 테마 정의
+# =====================================================
+LIGHT = { "bg": (245,245,245),       # 배경 색
+          "panel": (255,255,255),    # 패널 색
+          "text": (30,30,30),        # 텍스트 색
+          "accent": (80,160,255),    # 강조 색
+          "shadow": (200,200,200)}   # 그림자 색
+
+DARK  = { "bg": (25,25,25), 
+          "panel": (40,40,40), 
+          "text": (235,235,235), 
+          "accent": (120,180,255), 
+          "shadow": (10,10,10)}
+def make_sfx(frequency=440, duration_ms=150, volume=0.2, sample_rate=44100):
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    단일 주파수 기반 사운드 효과(SFX)를 생성.
+    사인파와 삼각파 혼합, 화음, ADSR envelope, 짧은 리버브를 적용.
+
+    =====================================================
+    Parameters:
+    =====================================================
+    frequency : float, optional
+        기본 사운드 주파수(Hz), 기본값=440
+    duration_ms : int, optional
+        사운드 길이(ms), 기본값=150
+    volume : float, optional
+        최종 출력 볼륨(0~1), 기본값=0.2
+    sample_rate : int, optional
+        샘플링 주파수, 기본값=44100
+
+    =====================================================
+    Returns:
+    =====================================================
+    pygame.mixer.Sound
+        생성된 사운드 효과 객체
+        실패 시 None 반환
+    """
+
+    try:
+        # =====================================================
+        # 시간 배열 생성
+        # =====================================================
+        t = np.linspace(0, duration_ms/1000, int(sample_rate * duration_ms/1000), False)
+
+        # =====================================================
+        # 파형 생성: 사인파 + 삼각파 혼합
+        # =====================================================
+        sine = np.sin(2 * np.pi * frequency * t)
+        tri = 2 * np.abs(2*((frequency*t)%1)-1) - 1
+        wave = 0.6 * sine + 0.4 * tri
+
+        # =====================================================
+        # 화음 추가 (미세한 주파수 변형)
+        # =====================================================
+        wave += 0.3 * np.sin(2*np.pi*(frequency*1.03)*t)
+        wave += 0.2 * np.sin(2*np.pi*(frequency*0.97)*t)
+
+        # =====================================================
+        # 정규화
+        # =====================================================
+        wave /= np.max(np.abs(wave))
+
+        # =====================================================
+        # ADSR envelope 적용
+        # =====================================================
+        attack = int(0.05*len(t))          # Attack 단계 길이
+        decay = int(0.1*len(t))            # Decay 단계 길이
+        sustain = int(0.6*len(t))          # Sustain 단계 길이
+        release = len(t) - (attack + decay + sustain)  # Release 단계 길이
+
+        envelope = np.concatenate([
+            np.linspace(0, 1, attack),        # Attack: 0 → 1
+            np.linspace(1, 0.8, decay),       # Decay: 1 → 0.8
+            np.ones(sustain)*0.8,             # Sustain: 일정 레벨 유지
+            np.linspace(0.8, 0, release)     # Release: 0.8 → 0
+        ])
+        wave *= envelope
+
+        # =====================================================
+        # 리버브 느낌 추가 (짧은 echo)
+        # =====================================================
+        echo_len = int(0.005 * sample_rate)
+        wave[echo_len:] += 0.2 * wave[:-echo_len]
+
+        # =====================================================
+        # 정수형 변환 및 Sound 객체 생성
+        # =====================================================
+        audio = np.int16(wave * 32767 * volume)
+        sound = pygame.mixer.Sound(buffer=audio)
+        return sound
+
+    except Exception:
+        # =====================================================
+        # 예외 처리: 실패 시 silent Sound 반환
+        # =====================================================
+        try:
+            silent = np.zeros(100, dtype=np.int16)
+            return pygame.mixer.Sound(buffer=silent)
+        except Exception:
+            return None
+
+
+
+SFX_PLACE = make_sfx(600, 60, 0.15)
+SFX_CONFIRM = make_sfx(880, 140, 0.2)
+SFX_ERROR = make_sfx(220, 200, 0.12)
+
+# 버튼 클래스
+class Button:
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    UI 버튼 클래스
+    - 마우스 호버/클릭 감지
+    - 애니메이션(확대 효과) 적용
+    - 그림자, 패널, 테두리, 텍스트 렌더링 지원
+
+    =====================================================
+    Parameters:
+    =====================================================
+    text : str
+        버튼에 표시될 텍스트
+    x, y : int
+        버튼 중앙 좌표
+    w, h : int
+        버튼 너비와 높이
+    callback : function, optional
+        버튼 클릭 시 호출될 함수, 기본값=None
+
+    =====================================================
+    Attributes:
+    =====================================================
+    rect : pygame.Rect
+        버튼 영역
+    hovered : bool
+        마우스 호버 상태
+    scale : float
+        버튼 확대/축소 비율
+    callback : function
+        클릭 시 호출할 함수
+    """
+
+    # =====================================================
+    # 생성자
+    # =====================================================
+    def __init__(self, text, x, y, w, h, callback=None):
+        self.text = text                  # 버튼 텍스트
+        self.rect = pygame.Rect(x, y, w, h)  # 버튼 영역
+        self.hovered = False              # 호버 상태 초기화
+        self.scale = 1.0                  # 초기 확대/축소 비율
+        self.callback = callback          # 클릭 시 호출할 함수
+
+    # =====================================================
+    # 버튼 그리기
+    # =====================================================
+    def draw(self, surface, colors):
+        # =================================================
+        # 확대 애니메이션
+        # =================================================
+        target_scale = 1.05 if self.hovered else 1.0
+        self.scale += (target_scale - self.scale) * 0.2
+
+        # =================================================
+        # 버튼 실제 크기 계산
+        # =================================================
+        w, h = self.rect.width * self.scale, self.rect.height * self.scale
+        rect = pygame.Rect(self.rect.centerx - w/2, self.rect.centery - h/2, w, h)
+
+        # =================================================
+        # 그림자 그리기
+        # =================================================
+        shadow_rect = rect.copy()
+        shadow_rect.x += 3
+        shadow_rect.y += 3
+        pygame.draw.rect(surface, colors["shadow"], shadow_rect, border_radius=14)
+
+        # =================================================
+        # 버튼 배경/테두리 그리기
+        # =================================================
+        pygame.draw.rect(surface, colors["panel"], rect, border_radius=12)
+        pygame.draw.rect(surface, colors["accent"], rect, 3, border_radius=12)
+
+        # =================================================
+        # 텍스트 그리기
+        # =================================================
+        tw = font_text.get_rect(self.text).width
+        th = font_text.get_sized_height()
+        font_text.render_to(surface, (rect.centerx - tw//2, rect.centery - th//2),
+                            self.text, fgcolor=colors["text"])
+
+    # =====================================================
+    # 마우스 호버 감지
+    # =====================================================
+    def check_hover(self, pos):
+        self.hovered = self.rect.collidepoint(pos)
+
+    # =====================================================
+    # 클릭 시 콜백 실행
+    # =====================================================
+    def click(self):
+        if self.callback:
+            if SFX_PLACE:  # 클릭 시 효과음 재생
+                SFX_PLACE.play()
+            self.callback()  # 콜백 함수 호출
+
+
+# 블록 클래스
+class Block:
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    게임 화면 내 개별 블록을 표현하는 클래스.
+    - 색상, 위치, 고정 여부(fixed) 관리
+    - 하단 블록 여부(is_bottom) 판단
+    - 렌더링 지원 (필터 적용 가능)
+
+    =====================================================
+    Parameters:
+    =====================================================
+    c : tuple(int,int,int)
+        블록 색상 (RGB)
+    rect : pygame.Rect
+        블록 위치 및 크기
+    is_bottom : bool, optional
+        하단 블록 여부, 기본값=False
+    fixed : bool, optional
+        초기 상태에서 채워진 블록 여부, 기본값=False
+
+    =====================================================
+    Attributes:
+    =====================================================
+    c : tuple(int,int,int)
+        현재 블록 색상
+    rect : pygame.Rect
+        블록 영역
+    is_bottom : bool
+        하단 블록 여부
+    fixed : bool
+        블록이 고정(fixed) 상태인지
+    filled : bool
+        현재 채워진 상태 (fixed이면 True)
+    origin_color : tuple(int,int,int)
+        원래 색상 저장
+    """
+
+    # =====================================================
+    # 생성자
+    # =====================================================
+    def __init__(self, c, rect, is_bottom=False, fixed=False):
+        self.c = c                  # 블록 색상
+        self.rect = rect            # 블록 영역
+        self.is_bottom = is_bottom  # 하단 여부
+        self.fixed = fixed          # 고정 여부
+        self.filled = fixed         # 채워진 상태 초기화
+        self.origin_color = c       # 원래 색상 저장
+
+    # =====================================================
+    # 블록 그리기
+    # =====================================================
+    def draw(self, surface, colors, filter_func=None):
+        """
+        블록을 화면에 렌더링.
+        - filter_func: 색상 필터 함수 적용 가능
+        """
+        col = self.c
+        if filter_func:
+            col = filter_func(col)  # 필터 적용
+
+        # 블록 본체
+        pygame.draw.rect(surface, col, self.rect, border_radius=10)
+        # 테두리
+        pygame.draw.rect(surface, (0,0,0), self.rect, 2, border_radius=10)
+
+
+# 파티클 클래스
+class Particle:
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    화면에 파티클(입자) 효과를 구현하는 클래스.
+    - 위치, 색상, 속도, 중력, 수명 관리
+    - update()로 위치 및 속도 갱신
+    - draw()로 화면에 반투명 원 형태로 렌더링
+
+    =====================================================
+    Parameters:
+    =====================================================
+    x, y : float
+        초기 파티클 위치
+    color : tuple(int,int,int)
+        기본 RGB 색상
+
+    =====================================================
+    Attributes:
+    =====================================================
+    x, y : float
+        현재 위치
+    color : tuple(int,int,int)
+        실제 렌더링 색상 (랜덤 변형 포함)
+    radius : int
+        파티클 반지름 (랜덤)
+    vx, vy : float
+        x, y 방향 속도
+    life : int
+        남은 수명(프레임 단위)
+    gravity : float
+        중력 가속도
+    """
+
+    # =====================================================
+    # 생성자
+    # =====================================================
+    def __init__(self, x, y, color):
+        self.x = float(x)  # x 좌표
+        self.y = float(y)  # y 좌표
+
+        # 색상 랜덤 변형
+        self.color = (
+            max(0, min(255, color[0] + random.randint(-30, 30))),
+            max(0, min(255, color[1] + random.randint(-30, 30))),
+            max(0, min(255, color[2] + random.randint(-30, 30)))
+        )
+
+        self.radius = random.randint(3, 8)          # 파티클 크기
+        self.vx = random.uniform(-6, 6)             # x 방향 속도
+        self.vy = random.uniform(-9, -2)            # y 방향 속도
+        self.life = random.randint(40, 90)          # 수명(프레임 단위)
+        self.gravity = 0.25                          # 중력 가속도
+
+    # =====================================================
+    # 파티클 상태 갱신
+    # =====================================================
+    def update(self):
+        self.x += self.vx       # 위치 갱신 (x)
+        self.y += self.vy       # 위치 갱신 (y)
+        self.vy += self.gravity # 중력 적용
+        self.life -= 1          # 수명 감소
+
+    # =====================================================
+    # 파티클 화면 렌더링
+    # =====================================================
+    def draw(self, surface):
+        if self.life > 0:
+            # 투명도 계산: life가 줄어들수록 alpha 감소
+            alpha = max(0, int(255 * (self.life / 90)))
+
+            # 임시 Surface 생성 (반투명 지원)
+            surf = pygame.Surface((self.radius*2, self.radius*2), pygame.SRCALPHA)
+            
+            # 원 그리기
+            pygame.draw.circle(surf, (*self.color, alpha), (self.radius, self.radius), self.radius)
+            
+            # 화면에 blit
+            surface.blit(surf, (int(self.x - self.radius), int(self.y - self.radius)))
+# =====================================================
+# 색맹 필터(Color Vision Deficiency Simulation)
+# =====================================================
+
+def protanopia(color):
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    적록 색맹(프로타노피) 필터 적용
+    - 빨강(R) 감도가 감소된 색상 변환
+
+    =====================================================
+    Parameters:
+    =====================================================
+    color : tuple(int,int,int)
+        원래 RGB 색상
+
+    =====================================================
+    Returns:
+    =====================================================
+    tuple(int,int,int)
+        변환된 RGB 색상
+    """
+    r, g, b = color
+    r_new = 0.566 * r + 0.433 * g
+    g_new = 0.558 * r + 0.442 * g
+    return (int(r_new), int(g_new), int(b))
+
+
+def deuteranope(color):
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    적록 색맹(듀테라노피) 필터 적용
+    - 초록(G) 감도가 감소된 색상 변환
+
+    =====================================================
+    Parameters:
+    =====================================================
+    color : tuple(int,int,int)
+        원래 RGB 색상
+
+    =====================================================
+    Returns:
+    =====================================================
+    tuple(int,int,int)
+        변환된 RGB 색상
+    """
+    r, g, b = color
+    r_new = 0.625 * r + 0.375 * g
+    g_new = 0.7 * r + 0.3 * g
+    return (int(r_new), int(g_new), int(b))
+
+
+def tritanope(color):
+    """
+    =====================================================
+    Purpose:
+    =====================================================
+    청황 색맹(트리타노피) 필터 적용
+    - 파랑(B) 감도가 감소된 색상 변환
+
+    =====================================================
+    Parameters:
+    =====================================================
+    color : tuple(int,int,int)
+        원래 RGB 색상
+
+    =====================================================
+    Returns:
+    =====================================================
+    tuple(int,int,int)
+        변환된 RGB 색상
+    """
+    r, g, b = color
+    g_new = 0.95 * g + 0.05 * b
+    b_new = 0.433 * g + 0.567 * b
+    return (int(r), int(g_new), int(b_new))
+
+
+# D-15 게임 앱
+"""
+D-15 색각 테스트 게임 앱 클래스
+- 블록을 드래그하여 올바른 순서로 배열
+- 색각 이상 여부 분석
+- 난이도 조절 및 다크모드 지원
+"""
+
+class D15App:
+    def __init__(self):
+        """
+        D15App 초기화
+        - 기본 변수 설정
+        - 색상 팔레트, 버튼, 블록 초기화
+        - 분석용 변수 초기화
+        """
+        self.is_dark=False            # 다크모드 여부
+        self.filter_func=None         # 색각 필터 (protanopia, deuteranope 등)
+        self.top_blocks=[]            # 상단 블록 리스트
+        self.bottom_blocks=[]         # 하단 블록 리스트
+        self.dragging_block=None      # 드래그 중인 블록
+        self.drag_offset=(0,0)        # 드래그 마우스와 블록 좌표 차이
+        self.moves_stack=[]           # 되돌리기 기록 스택
+        self.particles=[]             # 파티클 효과 리스트
+        self.start_time=time.time()   # 게임 시작 시각
+        self.elapsed_time=0           # 경과 시간
+        self.result_message=""        # 결과 메시지
+        self.score = 0                # 정답 점수
+        self.difficulty = 16          # 난이도: 사용 색상 수
+        self.bottom_count = 14        # 하단 블록 개수
+        self.D15_COLORS=[             # D-15 색상 팔레트 (RGB)
+            (93,130,160),(99,130,143),(96,132,137),(97,133,128),
+            (99,133,119),(102,133,111),(109,132,98),(119,128,84),
+            (134,122,76),(140,117,82),(145,113,96),(146,111,105),
+            (145,111,114),(141,112,125),(136,114,135),(129,117,143)
+        ]
+        self.show_game_buttons=False # 게임 버튼 표시 여부
+
+        # 버튼 초기화
+        self.reset_button = Button("초기화",50,540,150,50,self.create_blocks)       # 초기화 버튼
+        self.undo_button = Button("되돌리기",225,540,150,50,self.undo)              # 되돌리기 버튼
+        self.check_button = Button("확인",400,540,150,50,self.check)                # 확인 버튼
+        self.back_button= Button("뒤로 돌아가기",500,640,250,70)                    # 뒤로 돌아가기 버튼
+
+        # 블록 초기 생성
+        self.create_blocks()
+
+        # 분석용 변수 초기화
+        self.analysis_display_time = 0
+        self.show_analysis = False
+        self.fade_alpha = 0
+        self.last_total_error = None
+        self.last_confusion_category = None
+        self.last_placed_idxs = []
+
+    """ 난이도 설정 메서드 """
+    def set_difficulty_easy(self):
+        """ 쉬움: 색상 8개, 하단 블록 6개 """
+        self.difficulty = 8
+        self.bottom_count = 6
+        self.create_blocks()
+        if SFX_CONFIRM: SFX_CONFIRM.play()   # 확인 사운드
+
+    def set_difficulty_normal(self):
+        """ 보통: 색상 12개, 하단 블록 10개 """
+        self.difficulty = 12
+        self.bottom_count = 10
+        self.create_blocks()
+        if SFX_CONFIRM: SFX_CONFIRM.play()
+
+    def set_difficulty_hard(self):
+        """ 어려움: 색상 16개, 하단 블록 14개 """
+        self.difficulty = 16
+        self.bottom_count = 14
+        self.create_blocks()
+        if SFX_CONFIRM: SFX_CONFIRM.play()
+
+    """ 블록 생성 """
+    def create_blocks(self):
+        """
+        - 난이도 기반 색상 섞기
+        - 상단(top) 블록과 하단(bottom) 블록 위치 생성
+        - 초기화 및 분석 변수 초기화
+        """
+        if self.difficulty < 4: self.difficulty = 4
+        mid = self.difficulty - 2
+        palette = self.D15_COLORS[:self.difficulty]
+
+        # First and last are fixed anchors
+        anchors = [palette[0], palette[-1]]
+        pool = palette[1:-1]
+        shuffled = [pool[i] for i in secrets.SystemRandom().sample(range(len(pool)), len(pool))] if pool else []
+        full_colors = [anchors[0]] + shuffled + [anchors[1]]
+
+        # 상단 및 하단 위치 생성
+        top_pos = self.get_positions(120, len(shuffled))
+        bottom_pos = self.get_positions(400, self.bottom_count)
+
+        # 상단 블록 초기화
+        self.top_blocks = [Block(c.copy() if isinstance(c, list) else c, r) for c,r in zip(shuffled,top_pos)]
+
+        # 하단 블록 초기화
+        self.bottom_blocks = []
+        for i,r in enumerate(bottom_pos):
+            if i==0:
+                b=Block(full_colors[0],r,is_bottom=True,fixed=True)
+            elif i==len(bottom_pos)-1:
+                b=Block(full_colors[-1],r,is_bottom=True,fixed=True)
+            else:
+                b=Block((200,200,200),r,is_bottom=True)
+            self.bottom_blocks.append(b)
+
+        # 초기화 후 변수 리셋
+        self.moves_stack=[]
+        self.score=0
+        self.elapsed_time=0
+        self.result_message="게임 초기화 완료"
+        self.start_time=time.time()
+        self.show_analysis=False
+        self.last_total_error = None
+        self.last_confusion_category = None
+        self.last_placed_idxs = []
+
+    """ 블록 위치 계산 """
+    def get_positions(self,y,count):
+        """
+        - y: 시작 y좌표
+        - count: 블록 수
+        - 중앙 정렬하여 블록 Rect 리스트 반환
+        """
+        pos=[]
+        size=50; pad=10
+        total_w = count*(size+pad)-pad
+        start_x=(WIDTH-total_w)//2
+        for i in range(count):
+            x=start_x+i*(size+pad)
+            pos.append(pygame.Rect(x,y,size,size))
+        return pos
+
+    """ 다크모드 전환 """
+    def toggle_dark_mode(self):
+        """
+        - 페이드 애니메이션으로 다크/라이트 전환
+        - 간단한 선형 보간 사용
+        """
+        target = not self.is_dark
+        duration = 0.25
+        start_colors = LIGHT if not self.is_dark else DARK
+        end_colors = DARK if not self.is_dark else LIGHT
+
+        t0 = time.time()
+        while time.time() - t0 < duration:
+            u = (time.time() - t0) / duration
+            r = int(start_colors['bg'][0] * (1-u) + end_colors['bg'][0] * u)
+            g = int(start_colors['bg'][1] * (1-u) + end_colors['bg'][1] * u)
+            b = int(start_colors['bg'][2] * (1-u) + end_colors['bg'][2] * u)
+            screen.fill((r,g,b))
+            pygame.display.flip()
+            clock.tick(60)
+        self.is_dark = target
+
+    """ 색각 필터 설정 """
+    def set_prot(self): self.filter_func = protanopia
+    def set_deut(self): self.filter_func = deuteranope
+    def set_trit(self): self.filter_func = tritanope
+    def set_normal(self): self.filter_func = None
+
+    """ 이벤트 처리 """
+    def handle_events(self):
+        """
+        - 마우스 이벤트 처리
+        - 블록 드래그, 하단 블록에 놓기, 버튼 클릭 처리
+        """
+        mx,my=pygame.mouse.get_pos()
+        for event in pygame.event.get():
+            if event.type==pygame.QUIT:
+                pygame.quit(); sys.exit()
+            elif event.type==pygame.MOUSEBUTTONDOWN:
+                if self.show_game_buttons:
+                    for b in [self.reset_button, self.undo_button, self.check_button]:
+                        if b.rect.collidepoint(mx,my): b.click(); break
+                # pick up top block
+                for idx, b in enumerate(self.top_blocks):
+                    if b.rect.collidepoint(mx,my):
+                        self.dragging_block=b
+                        self.drag_offset=(mx-b.rect.x,my-b.rect.y)
+                        break
+            elif event.type==pygame.MOUSEBUTTONUP:
+                if self.dragging_block:
+                    # find empty bottom block by distance
+                    empty_blocks=[b for b in self.bottom_blocks if not b.filled]
+                    if empty_blocks:
+                        closest=min(empty_blocks,key=lambda b:(b.rect.centerx-self.dragging_block.rect.centerx)**2 + (b.rect.centery-self.dragging_block.rect.centery)**2)
+                        closest.c=self.dragging_block.c
+                        closest.filled=True
+                        closest.origin_color = closest.c
+                        self.moves_stack.append({'top':self.dragging_block,'bottom':closest})
+                        for _ in range(30):  # 파티클 효과
+                            self.particles.append(Particle(closest.rect.centerx,closest.rect.centery,closest.c))
+                        if self.dragging_block in self.top_blocks:
+                            self.top_blocks.remove(self.dragging_block)
+                    self.dragging_block=None
+            elif event.type==pygame.MOUSEMOTION:
+                if self.dragging_block:
+                    self.dragging_block.rect.x=mx-self.drag_offset[0]
+                    self.dragging_block.rect.y=my-self.drag_offset[1]
+        if all(b.filled for b in self.bottom_blocks):
+            if not self.show_analysis:
+                self.check()
+
+    """ 상태 업데이트 """
+    def update(self):
+        self.elapsed_time=int(time.time()-self.start_time)
+        mx,my=pygame.mouse.get_pos()
+        if self.show_game_buttons:
+            for b in [self.reset_button, self.undo_button, self.check_button,self.back_button]:
+                b.check_hover((mx,my))
+        for p in self.particles:
+            p.update()
+        self.particles=[p for p in self.particles if p.life>0]
+        if self.show_analysis and time.time() - self.analysis_display_time > 4:
+            self.show_analysis = False
+
+    """ 화면 렌더링 """
+    def render(self):
+        colors=DARK if self.is_dark else LIGHT
+        screen.fill(colors["bg"])
+        for b in self.bottom_blocks+self.top_blocks:
+            b.draw(screen,colors,self.filter_func)
+        if self.dragging_block:
+            self.dragging_block.draw(screen,colors,self.filter_func)
+        for p in self.particles:
+            p.draw(screen)
+        if self.show_game_buttons:
+            for b in [self.reset_button, self.undo_button, self.check_button]:
+                b.draw(screen,colors)
+        font_text.render_to(screen,(50,20),f"시간: {self.elapsed_time}s",fgcolor=colors["text"])
+        font_text.render_to(screen,(50,50),f"점수: {self.score}",fgcolor=colors["text"])
+        if self.result_message:
+            panel=pygame.Surface((700,90),pygame.SRCALPHA)
+            panel.fill((*colors["panel"],220))
+            screen.blit(panel,(WIDTH//2-350,560))
+            font_text.render_to(screen,(WIDTH//2-font_text.get_rect(self.result_message).width//2,585),
+                                self.result_message,fgcolor=colors["text"])
+        if self.show_analysis:
+            self.draw_analysis(colors)
+        pygame.display.flip()
+
+    """ 분석 패널 그리기 """
+    def draw_analysis(self, colors):
+        w, h = 580, 220
+        x0, y0 = WIDTH//2 - w//2, HEIGHT//2 - h//2 - 10
+        panel = pygame.Surface((w,h), pygame.SRCALPHA)
+        panel.fill((*colors['panel'], 240))
+        font_text.render_to(panel, (20, 10), "결과 분석", fgcolor=colors['text'])
+        correct = self.score
+        total = self.difficulty
+        bar_x, bar_y = 20, 50
+        bar_w, bar_h = w-40, 20
+        pygame.draw.rect(panel, (180,180,180), (bar_x, bar_y, bar_w, bar_h), border_radius=6)
+        if total > 0:
+            filled_w = int(bar_w * (correct/total))
+            pygame.draw.rect(panel, (100,200,120), (bar_x, bar_y, filled_w, bar_h), border_radius=6)
+        font_text.render_to(panel, (bar_x, bar_y+bar_h+8), f"정답(단순비교): {correct}/{total}", fgcolor=colors['text'])
+        stripe_x, stripe_y = 20, 150
+        stripe_h = 40
+        n = len(self.bottom_blocks)
+        if n>0:
+            seg_w = (w-40) // n
+            for i, b in enumerate(self.bottom_blocks):
+                c = b.c if b.c else (200,200,200)
+                pygame.draw.rect(panel, c, (stripe_x + i*seg_w, stripe_y, seg_w, stripe_h))
+                pygame.draw.rect(panel, (0,0,0), (stripe_x + i*seg_w, stripe_y, seg_w, stripe_h),1)
+                if i < len(self.last_placed_idxs):
+                    placed_idx = self.last_placed_idxs[i]
+                    if placed_idx is None:
+                        txt = "?"
+                    else:
+                        expected_pos = int((i/(len(self.bottom_blocks)-1))*(self.difficulty-1))
+                        n_pal = max(1, self.difficulty)
+                        d = min((placed_idx-expected_pos) % n_pal, (expected_pos-placed_idx) % n_pal)
+                        txt = str(d)
+                    small = pygame.font.SysFont("Malgun Gothic", 16)
+                    small_surf = small.render(txt, True, (0,0,0))
+                    panel.blit(small_surf, (stripe_x + i*seg_w + 4, stripe_y + 4))
+                    screen.blit(panel, (x0, y0))
+
+    """ 색각 확인 및 점수 계산 """
+    def check(self):
+        palette = self.D15_COLORS[:self.difficulty]
+        n_pal = len(palette)
+        def nearest_index(col):
+            dmin = float('inf'); idx = -1
+            for i,p in enumerate(palette):
+                d = (p[0]-col[0])**2 + (p[1]-col[1])**2 + (p[2]-col[2])**2
+                if d < dmin:
+                    dmin = d; idx = i
+            return idx
+        placed_idxs = []
+        for bb in self.bottom_blocks:
+            if bb.c and bb.c != (200,200,200):
+                placed_idxs.append(nearest_index(bb.c))
+            else:
+                placed_idxs.append(None)
+        self.last_placed_idxs = placed_idxs.copy()
+        expected_idxs = []
+        m = len(self.bottom_blocks)
+        for i in range(m):
+            expected_pos = int((i/(m-1))*(n_pal-1))
+            expected_idxs.append(expected_pos)
+        total_error = 0
+        per_slot = []
+        for i, placed in enumerate(placed_idxs):
+            expected = expected_idxs[i]
+            if placed is None:
+                d = n_pal
+            else:
+                d = min((placed-expected) % n_pal, (expected-placed) % n_pal)
+            per_slot.append(d)
+            total_error += d
+        self.last_total_error = total_error
+        threshold_normal = max(1, int(0.25 * n_pal * m / 4))
+        threshold_mild = max(1, int(0.6 * n_pal * m / 4))
+        if total_error <= threshold_normal:
+            category = "정상 색각"
+        elif total_error <= threshold_mild:
+            category = "약간의 색각 이상"
+        else:
+            category = "색각 이상 가능성 높음"
+        self.last_confusion_category = category
+        correct = 0
+        for i, bb in enumerate(self.bottom_blocks):
+            expected_pos = expected_idxs[i]
+            if placed_idxs[i] is not None and placed_idxs[i] == expected_pos:
+                correct += 1
+        self.score = correct
+        self.result_message = f"정답: {correct}/{len(self.bottom_blocks)} | 오차합: {total_error} | 분석: {category}"
+        self.analysis_display_time = time.time()
+        self.show_analysis = True
+        if SFX_CONFIRM: SFX_CONFIRM.play()
+
+    """ 되돌리기 """
+    def undo(self):
+        if self.moves_stack:
+            move = self.moves_stack.pop()
+            move['bottom'].c = (200,200,200)
+            move['bottom'].filled = False
+            self.top_blocks.append(move['top'])
+            self.result_message = "되돌리기 완료"
+            if SFX_PLACE: SFX_PLACE.play()
+
+    """ 메인 실행 루프 """
+    def run(self):
+        self.show_game_buttons=True
+        # fade-in 효과
+        for a in range(0, 255, 30):
+            fade = pygame.Surface((WIDTH, HEIGHT))
+            fade.set_alpha(255-a)
+            fade.fill((0,0,0))
+            self.handle_events()
+            self.update()
+            self.render()
+            screen.blit(fade, (0,0))
+            pygame.display.flip(); clock.tick(60)
+        while True:
+            self.handle_events()
+            self.update()
+            self.render()
+            clock.tick(60)
+
+
+# 메뉴 클래스 (메인 + 옵션)
+"""
+D-15 색각 테스트 메인 메뉴 클래스
+- 메뉴 항목 선택 (키보드 + 마우스)
+- 난이도 선택, 옵션, 게임 시작, 종료 처리
+"""
+
+class MainMenu:
+    def __init__(self, app):
+        """
+        메인 메뉴 초기화
+        - app: D15App 인스턴스 연결
+        - 메뉴 옵션, 버튼, 상태 변수 초기화
+        """
+        self.app = app
+        self.options = ["게임 시작", "옵션", "난이도 선택", "종료"]
+        self.selected_index = 0      # 키보드 선택 인덱스
+        self.is_running = True       # 메뉴 루프 실행 여부
+        self.start_game = False      # 게임 시작 플래그
+
+        # 마우스로 선택할 수 있는 버튼 생성
+        self.buttons = []
+        for i, opt in enumerate(self.options):
+            # lambda 안에서 o=opt를 지정해야 클릭 시 정확한 값 전달
+            self.buttons.append(
+                Button(
+                    opt,
+                    WIDTH//2-120, 240+i*70, 240, 56,
+                    callback=lambda o=opt: self.select_option(o)
+                )
+            )
+
+    """ 메뉴 항목 선택 """
+    def select_option(self, opt):
+        """
+        메뉴 옵션 클릭/엔터 선택 시 동작
+        - 게임 시작, 옵션, 난이도, 종료 처리
+        """
+        if opt == "게임 시작":
+            self.start_game = True
+            self.is_running = False
+        elif opt == "옵션":
+            palette = CommandPalette(self.app)
+            palette.run()
+        elif opt == "난이도 선택":
+            self.open_difficulty_menu()
+        elif opt == "종료":
+            pygame.quit()
+            sys.exit()
+
+    """ 난이도 선택 서브 메뉴 """
+    def open_difficulty_menu(self):
+        """
+        - 버튼 4개: 쉬움, 보통, 어려움, 뒤로
+        - 마우스 클릭 및 ESC 키로 메뉴 종료
+        - 선택 시 D15App 난이도 변경
+        """
+        running = True
+        # 난이도 버튼 생성
+        easy = Button("쉬움", WIDTH//2-150, 240, 300, 60, callback=self.app.set_difficulty_easy)
+        normal = Button("보통", WIDTH//2-150, 320, 300, 60, callback=self.app.set_difficulty_normal)
+        hard = Button("어려움", WIDTH//2-150, 400, 300, 60, callback=self.app.set_difficulty_hard)
+        back = Button("뒤로", WIDTH//2-150, 480, 300, 60, callback=lambda: None)
+
+        while running:
+            # 이벤트 처리
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    mx,my = pygame.mouse.get_pos()
+                    for b in [easy,normal,hard,back]:
+                        if b.rect.collidepoint(mx,my):
+                            b.click()
+                            if b is back:
+                                running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    running = False
+
+            # 배경색 결정
+            colors = DARK if self.app.is_dark else LIGHT
+            screen.fill(colors['bg'])
+
+            # 제목 렌더링
+            font_text.render_to(
+                screen,
+                (WIDTH//2 - font_text.get_rect("난이도 선택").width//2, 140),
+                "난이도 선택",
+                fgcolor=colors['accent']
+            )
+
+            # 버튼 렌더링
+            for b in [easy,normal,hard,back]:
+                b.check_hover(pygame.mouse.get_pos())
+                b.draw(screen, colors)
+
+            pygame.display.flip()
+            clock.tick(60)
+
+    """ 키보드 + 마우스 이벤트 처리 """
+    def handle_events(self):
+        """
+        - 방향키로 선택 인덱스 이동
+        - 엔터로 선택
+        - 마우스 클릭으로 버튼 선택
+        """
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_UP:
+                    self.selected_index = max(0, self.selected_index-1)
+                elif event.key == pygame.K_DOWN:
+                    self.selected_index = min(len(self.options)-1, self.selected_index+1)
+                elif event.key == pygame.K_RETURN:
+                    self.select_option(self.options[self.selected_index])
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                mx,my = pygame.mouse.get_pos()
+                for b in self.buttons:
+                    if b.rect.collidepoint(mx,my):
+                        b.click()
+
+    """ 화면 렌더링 """
+    def render(self):
+        """
+        - 배경 그라데이션
+        - 메뉴 제목 및 버튼 렌더링
+        - 키보드 선택 강조(버튼 hover 처리)
+        """
+        colors = DARK if self.app.is_dark else LIGHT
+
+        # 배경 그라데이션
+        for i in range(HEIGHT):
+            ratio = i / HEIGHT
+            r = int(colors['bg'][0]*(1-ratio) + colors['accent'][0]*ratio)
+            g = int(colors['bg'][1]*(1-ratio) + colors['accent'][1]*ratio)
+            b = int(colors['bg'][2]*(1-ratio) + colors['accent'][2]*ratio)
+            pygame.draw.line(screen, (r,g,b), (0,i), (WIDTH,i))
+
+        # 제목 흔들림 애니메이션
+        title = "D-15 색각 테스트"
+        t_off = int(8 * math.sin(time.time()*2))
+        font_text.render_to(
+            screen,
+            (WIDTH//2 - font_text.get_rect(title).width//2 + t_off, 100),
+            title,
+            fgcolor=colors['accent']
+        )
+
+        # 버튼 렌더링
+        for b in self.buttons:
+            b.check_hover(pygame.mouse.get_pos())
+            b.draw(screen, colors)
+
+        pygame.display.flip()
+
+    """ 메인 루프 """
+    def run(self):
+        while self.is_running:
+            self.handle_events()
+            self.render()
+            clock.tick(60)
+
+# CommandPalette
+"""
+D-15 색각 테스트 명령 팔레트 클래스
+- 키보드로 직접 명령 입력
+- 필터링 + 선택 + 실행
+"""
+
+class CommandPalette:
+    def __init__(self, app):
+        """
+        명령 팔레트 초기화
+        - app: D15App 인스턴스 연결
+        - 입력창, 실행 명령, 상태 변수 초기화
+        """
+        self.app = app
+        self.input_text = ""           # 현재 입력 텍스트
+        self.is_running = True         # 팔레트 실행 여부
+        self.selected_index = 0        # 현재 선택된 명령 인덱스
+
+        # 명령어 목록과 실행 함수 매핑
+        self.commands = {
+            "다크모드": self.app.toggle_dark_mode,
+            "Protanopia": self.app.set_prot,
+            "Deuteranope": self.app.set_deut,
+            "Tritanope": self.app.set_trit,
+            "Normal": self.app.set_normal,
+            "초기화": self.app.create_blocks,
+            "되돌리기": self.app.undo,
+            "게임시작": lambda: self.exit_palette()  # 게임 시작 시 팔레트 종료
+        }
+
+        # 필터링된 명령 초기값: 전체 명령
+        self.filtered_commands = list(self.commands.keys())
+
+    """ 팔레트 종료 """
+    def exit_palette(self):
+        self.is_running = False
+
+    """ 이벤트 처리 """
+    def handle_events(self):
+        """
+        - 키보드 입력 처리:
+            ESC: 종료
+            ENTER: 선택 실행
+            UP/DOWN: 선택 이동
+            BACKSPACE: 입력 삭제
+            기타 문자: 입력 + 필터링
+        """
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.is_running = False
+                elif event.key == pygame.K_RETURN:
+                    if self.filtered_commands:
+                        cmd = self.filtered_commands[self.selected_index]
+                        action = self.commands.get(cmd)
+                        if action:
+                            action()
+                            if SFX_CONFIRM: SFX_CONFIRM.play()
+                elif event.key == pygame.K_UP:
+                    self.selected_index = max(0, self.selected_index-1)
+                elif event.key == pygame.K_DOWN:
+                    self.selected_index = min(len(self.filtered_commands)-1, self.selected_index+1)
+                elif event.key == pygame.K_BACKSPACE:
+                    self.input_text = self.input_text[:-1]
+                else:
+                    # 일반 문자 입력 처리
+                    self.input_text += event.unicode
+                    # 입력 기반으로 명령어 필터링
+                    self.filtered_commands = [
+                        c for c in self.commands if self.input_text.lower() in c.lower()
+                    ]
+                    # 선택 인덱스가 범위 밖이면 초기화
+                    if self.selected_index >= len(self.filtered_commands):
+                        self.selected_index = 0
+
+    """ 화면 렌더링 """
+    def render(self):
+        """
+        - 배경색
+        - 제목
+        - 입력창
+        - 필터링된 명령 리스트 (선택 강조)
+        """
+        colors = DARK if self.app.is_dark else LIGHT
+        screen.fill(colors["bg"])
+
+        # 제목
+        font_text.render_to(screen, (WIDTH//2 - 100, 100), "명령 팔레트", fgcolor=colors["accent"])
+
+        # 입력창
+        pygame.draw.rect(screen, colors["panel"], (WIDTH//2 - 200, 160, 400, 40), border_radius=10)
+        font_text.render_to(screen, (WIDTH//2 - 190, 170), self.input_text, fgcolor=colors["text"])
+
+        # 명령 리스트 최대 6개 표시
+        for i, cmd in enumerate(self.filtered_commands[:6]):
+            color = colors["accent"] if i == self.selected_index else colors["text"]
+            font_text.render_to(screen, (WIDTH//2 - 190, 220 + i*40), cmd, fgcolor=color)
+
+        pygame.display.flip()
+
+    """ 메인 루프 """
+    def run(self):
+        while self.is_running:
+            self.handle_events()
+            self.render()
+            clock.tick(60)
+
+
+
+# 실행
+app = D15App()
+menu = MainMenu(app)
+menu.run()
+app.run()
