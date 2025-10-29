@@ -1,0 +1,217 @@
+import pygame
+import secrets
+import numpy as np
+import time
+
+# =====================================================
+# 초기 설정
+# =====================================================
+pygame.init()
+pygame.mixer.init()
+
+WIDTH, HEIGHT = 1000, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("색약 D-15 테스트")
+clock = pygame.time.Clock()
+
+# 색상
+WHITE = (245, 245, 245)
+GRAY = (230, 230, 230)
+BLACK = (0, 0, 0)
+BUTTON_COLOR = (180, 220, 255)
+BUTTON_HOVER = (150, 200, 255)
+CELL_SIZE = 50
+PADDING = 10
+
+# =====================================================
+# 상단 색상 (15색)
+# =====================================================
+top_colors = [
+    (93,130,160),(99,130,143),(96,132,137),(97,133,128),
+    (99,133,119),(102,133,111),(109,132,98),(119,128,84),
+    (134,122,76),(140,117,82),(145,113,96),(146,111,105),
+    (145,111,114),(141,112,125),(136,114,135)
+]
+
+# =====================================================
+# 정답 배열 생성 (엔트로피 기반 셔플 + 양 끝 고정)
+# =====================================================
+def shuffle_answer(colors):
+    correct = colors.copy()
+    first_color = correct[0]
+    last_color = correct[-1]
+    middle = correct[1:-1]
+
+    # secrets 기반 피셔–예이츠 셔플
+    for i in range(len(middle)-1, 0, -1):
+        j = secrets.randbelow(i+1)
+        middle[i], middle[j] = middle[j], middle[i]
+
+    shuffled = [first_color] + middle + [last_color]
+    return shuffled
+
+correct_answer = shuffle_answer(top_colors)
+
+# =====================================================
+# 상단 블록 섞기 (엔트로피 기반)
+# =====================================================
+def shuffle_blocks(colors):
+    shuffled = colors.copy()
+    first_color = shuffled[0]
+    last_color = shuffled[-1]
+    middle = shuffled[1:-1]
+
+    # 피셔–예이츠 셔플 (cryptographically secure)
+    for i in range(len(middle) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        middle[i], middle[j] = middle[j], middle[i]
+
+    return [first_color] + middle + [last_color]
+
+top_colors = shuffle_blocks(top_colors)
+
+# =====================================================
+# 하단 색상 초기화 (1번, 마지막 칸 고정)
+# =====================================================
+bottom_colors = [top_colors[0]] + [None]*13 + [top_colors[-1]]
+
+# =====================================================
+# 위치 계산
+# =====================================================
+def get_positions(y_offset, count):
+    positions = []
+    start_x = (WIDTH - (count * (CELL_SIZE + PADDING))) // 2
+    for i in range(count):
+        x = start_x + i * (CELL_SIZE + PADDING)
+        positions.append(pygame.Rect(x, y_offset, CELL_SIZE, CELL_SIZE))
+    return positions
+
+top_positions = get_positions(50, 15)
+bottom_positions = get_positions(300, 15)
+
+# =====================================================
+# 버튼
+# =====================================================
+button_font = pygame.font.SysFont(None, 32)
+reset_text = button_font.render("RESET", True, BLACK)
+undo_text = button_font.render("UNDO", True, BLACK)
+score_text = button_font.render("CHECK", True, BLACK)
+
+reset_button = pygame.Rect(WIDTH//2 - 150, 500, 120, 40)
+undo_button = pygame.Rect(WIDTH//2 + 30, 500, 120, 40)
+score_button = pygame.Rect(WIDTH//2 - 60, 550, 120, 40)
+
+# =====================================================
+# 단일 톤 사운드 생성 (스테레오)
+# =====================================================
+def make_sfx(frequency=440, duration_ms=100, volume=0.2, sample_rate=44100):
+    duration = duration_ms / 1000
+    t = np.linspace(0, duration, int(sample_rate*duration), False)
+    wave = np.sin(2*np.pi*frequency*t)
+    audio = np.int16(wave*32767*volume)
+    stereo_audio = np.column_stack((audio,audio))
+    return pygame.mixer.Sound(buffer=stereo_audio.tobytes())
+
+click_sound = make_sfx(440,100,0.2)
+selected_color = None
+reaction_times = []
+moves_stack = []
+score_display = 0
+
+# =====================================================
+# 메인 루프
+# =====================================================
+running = True
+while running:
+    screen.fill(WHITE)
+    mx, my = pygame.mouse.get_pos()
+
+    # 버튼 hover
+    for rect, text in [(reset_button, reset_text),(undo_button, undo_text),(score_button, score_text)]:
+        pygame.draw.rect(screen, BUTTON_HOVER if rect.collidepoint(mx,my) else BUTTON_COLOR, rect, border_radius=10)
+        screen.blit(text, (rect.centerx - text.get_width()//2, rect.centery - text.get_height()//2))
+
+    # 점수 표시
+    score_font = pygame.font.SysFont(None, 36)
+    score_surface = score_font.render(f"맞춘 개수: {score_display}/13", True, BLACK)
+    screen.blit(score_surface, (WIDTH//2 - score_surface.get_width()//2, 20))
+
+    # 이벤트 처리
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            start_time = time.perf_counter()
+
+            # 상단 색 클릭
+            for i, rect in enumerate(top_positions):
+                if rect.collidepoint(mx,my) and top_colors[i] != GRAY:
+                    selected_color = top_colors[i]
+                    click_sound.play()
+                    break
+
+            # 하단 색 칸 클릭
+            for i, rect in enumerate(bottom_positions):
+                if rect.collidepoint(mx,my) and selected_color:
+                    if i == 0 or i == 14:  # 양 끝 고정
+                        break
+                    bottom_colors[i] = selected_color
+                    moves_stack.append((i, selected_color))
+                    index = top_colors.index(selected_color)
+                    top_colors[index] = GRAY
+                    selected_color = None
+                    click_sound.play()
+                    elapsed = (time.perf_counter() - start_time)*1000
+                    reaction_times.append(elapsed)
+                    print(f"하단 클릭 반응시간: {elapsed:.2f} ms")
+                    break
+
+            # RESET 버튼 클릭
+            if reset_button.collidepoint(mx,my):
+                selected_color = None
+                base_colors = [
+                    (93,130,160),(99,130,143),(96,132,137),(97,133,128),
+                    (99,133,119),(102,133,111),(109,132,98),(119,128,84),
+                    (134,122,76),(140,117,82),(145,113,96),(146,111,105),
+                    (145,111,114),(141,112,125),(136,114,135)
+                ]
+                correct_answer = shuffle_answer(base_colors)
+                top_colors = shuffle_blocks(base_colors)
+                bottom_colors = [base_colors[0]] + [None]*13 + [base_colors[-1]]
+                moves_stack = []
+                score_display = 0
+                click_sound.play()
+
+            # UNDO 버튼 클릭
+            if undo_button.collidepoint(mx,my) and moves_stack:
+                idx, color = moves_stack.pop()
+                bottom_colors[idx] = None
+                top_index = [i for i,c in enumerate(top_colors) if c==GRAY][0]
+                top_colors[top_index] = color
+                click_sound.play()
+
+            # CHECK 버튼 클릭
+            if score_button.collidepoint(mx,my):
+                correct_count = sum(1 for i in range(1, 14) if bottom_colors[i] == correct_answer[i])
+                score_display = correct_count
+                click_sound.play()
+                print(f"정답 체크: {correct_count}/13 맞음")
+
+    # 상단 그리기
+    for i, rect in enumerate(top_positions):
+        pygame.draw.rect(screen, top_colors[i], rect)
+        pygame.draw.rect(screen, BLACK, rect, 2)
+
+    # 하단 그리기
+    for i, rect in enumerate(bottom_positions):
+        color = bottom_colors[i] if bottom_colors[i] else GRAY
+        pygame.draw.rect(screen, color, rect)
+        pygame.draw.rect(screen, BLACK, rect, 2)
+
+    # 선택된 색 표시
+    if selected_color:
+        pygame.draw.circle(screen, selected_color, (WIDTH//2, 220), 25)
+        pygame.draw.circle(screen, BLACK, (WIDTH//2, 220), 25, 2)
+
+    pygame.display.flip()
+    clock.tick(60)
